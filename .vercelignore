@@ -1,0 +1,16 @@
+node_modules
+dist
+.DS_Store
+*.tar.gz
+attached_assets
+script
+drizzle.config.ts
+.local
+.replit
+replit.nix
+replit.md
+server/index.ts
+server/vite.ts
+server/static.ts
+server/storage.ts
+server/ipHistory.ts
