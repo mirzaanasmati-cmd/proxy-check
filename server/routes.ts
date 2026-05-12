@@ -71,7 +71,7 @@ function httpsGetViaProxy(url: string, agent: HttpsProxyAgent<string>): Promise<
       });
     });
 
-    req.on("error", (err) => {
+    req.on("error", (err: any) => {
       clearTimeout(timer);
       reject(err);
     });
