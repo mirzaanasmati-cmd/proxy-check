@@ -18,7 +18,7 @@ async function checkProxyViaApi(proxy: string, index: number) {
   const start = Date.now();
 
   try {
-    // Step 1: Resolve domain to IP using Google DNS over HTTPS
+    // Step 1: Resolve domain to IP
     let resolvedIp = host;
     if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
       try {
@@ -30,20 +30,23 @@ async function checkProxyViaApi(proxy: string, index: number) {
       } catch {}
     }
 
-    // Step 2: Check port status via external API
-    const portController = new AbortController();
-    const portTimeout = setTimeout(() => portController.abort(), 6000);
-    
-    const portRes = await fetch(
-      `https://api.portchecktool.com/check?host=${resolvedIp}&port=${port}`,
-      { signal: portController.signal }
+    // Step 2: proxycheck.io se check karo
+    const checkController = new AbortController();
+    const checkTimeout = setTimeout(() => checkController.abort(), 7000);
+
+    const checkRes = await fetch(
+      `https://proxycheck.io/v2/${resolvedIp}?vpn=1&risk=1&port=${port}&seen=1`,
+      { signal: checkController.signal }
     );
-    clearTimeout(portTimeout);
-    const portData = await portRes.json();
-    const portOpen = portData?.status === 'open' || portData?.open === true;
+    clearTimeout(checkTimeout);
+    const checkData = await checkRes.json();
+    const ipData = checkData[resolvedIp] || {};
+
+    const isProxy = ipData.proxy === 'yes';
+    const portOpen = isProxy || ipData.port === parseInt(port);
     const latencyMs = Date.now() - start;
 
-    // Step 3: Get geo/fraud info
+    // Step 3: ip-api.com se geo info
     const geoController = new AbortController();
     const geoTimeout = setTimeout(() => geoController.abort(), 5000);
     const geoRes = await fetch(
@@ -57,31 +60,36 @@ async function checkProxyViaApi(proxy: string, index: number) {
     const asnMatch = asRaw.match(/^(AS\d+)/i);
     const asn = asnMatch ? asnMatch[1].toUpperCase() : (asRaw || null);
 
+    const fraudScore = ipData.risk ? String(ipData.risk) : (isProxy ? '75' : '10');
+    const fraudRisk = ipData.risk
+      ? (ipData.risk >= 75 ? 'Very High' : ipData.risk >= 50 ? 'High' : ipData.risk >= 25 ? 'Medium' : 'Low')
+      : (isProxy ? 'High' : 'Low');
+
     return {
       proxyString: proxy,
       working: portOpen,
       exitIp: resolvedIp,
       exitIpVersion: resolvedIp.includes(':') ? 'v6' : 'v4',
-      country: geo.country || null,
-      city: geo.city || null,
-      region: geo.regionName || null,
+      country: ipData.country || geo.country || null,
+      city: ipData.city || geo.city || null,
+      region: ipData.region || geo.regionName || null,
       postalCode: geo.zip || null,
       latitude: geo.lat || null,
       longitude: geo.lon || null,
-      isp: geo.isp || null,
+      isp: ipData.provider || geo.isp || null,
       asn: asn || null,
-      usageType: geo.hosting ? '(DCH) Data Center/Web Hosting/Transit' : '(COM) Commercial',
-      fraudScore: geo.proxy ? '75' : '10',
-      fraudRisk: geo.proxy ? 'High' : 'Low',
+      usageType: ipData.type || (geo.hosting ? '(DCH) Data Center/Web Hosting/Transit' : '(COM) Commercial'),
+      fraudScore,
+      fraudRisk,
       error: portOpen ? null : 'Port closed or unreachable',
       intelligence: null,
       internalFlags: null,
       reverseDns: null,
       openPorts: portOpen ? [parseInt(port)] : [],
-      isTorNode: false,
+      isTorNode: ipData.type === 'TOR' || false,
       latencyMs: portOpen ? latencyMs : null,
-      anonymityLevel: geo.proxy ? 'anonymous' : 'transparent',
-      provider: null,
+      anonymityLevel: ipData.anonymity || (isProxy ? 'anonymous' : 'transparent'),
+      provider: ipData.provider || null,
       changed: false
     };
   } catch (err: any) {
