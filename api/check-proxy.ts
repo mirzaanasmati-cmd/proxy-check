@@ -1,24 +1,103 @@
-import { checkSingleProxy } from "../server/routes";
-import { applyCors } from "./_cors";
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 export const config = { maxDuration: 10 };
 
-export default async function handler(req: any, res: any) {
-  if (applyCors(req, res)) return;
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ error: "Method not allowed" });
+async function checkProxyViaApi(proxy: string, index: number) {
+  const parts = proxy.trim().split(':');
+  if (parts.length < 2) {
+    return { index, ip: proxy, port: '', status: 'dead', error: 'Invalid format', changed: false };
   }
+
+  const [ip, port, username, password] = parts;
+  const start = Date.now();
+
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body ?? {});
-    const { proxy } = body;
-    if (!proxy || typeof proxy !== "string") {
-      return res.status(400).json({ error: "Missing 'proxy' string in body." });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(
+      `http://ip-api.com/json/${ip}?fields=status,country,city,isp,proxy,hosting,query`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeout);
+
+    const responseTime = Date.now() - start;
+
+    if (!response.ok) {
+      return { index, ip, port, username, password, status: 'dead', error: 'API error', changed: false };
     }
-    const result = await checkSingleProxy(proxy);
-    return res.status(200).json({ result });
+
+    const data = await response.json();
+
+    if (data.status === 'fail') {
+      return { index, ip, port, username, password, status: 'dead', error: 'IP lookup failed', changed: false };
+    }
+
+    return {
+      index, ip, port, username, password,
+      status: 'working',
+      responseTime,
+      country: data.country,
+      city: data.city,
+      isp: data.isp,
+      anonymityLevel: data.proxy ? 'Anonymous' : 'Transparent',
+      isVpn: data.proxy || false,
+      isDatacenter: data.hosting || false,
+      isTor: false,
+      fraudScore: data.proxy ? 75 : 10,
+      changed: false,
+    };
   } catch (err: any) {
-    console.error("[api/check-proxy] error:", err);
-    return res.status(500).json({ error: err?.message || "Internal server error" });
+    return {
+      index, ip, port, username, password,
+      status: 'dead',
+      error: err.name === 'AbortError' ? 'Timeout' : 'Connection failed',
+      changed: false,
+    };
+  }
+}
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  try {
+    const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body ?? {});
+    const { proxies, proxy } = body;
+
+    // Single proxy support
+    if (proxy && typeof proxy === 'string') {
+      const result = await checkProxyViaApi(proxy, 0);
+      return res.status(200).json({ result });
+    }
+
+    // Batch proxies support
+    if (!proxies || !Array.isArray(proxies)) {
+      return res.status(400).json({ error: 'Send proxies array or single proxy string' });
+    }
+
+    const results = [];
+    const batchSize = 5;
+
+    for (let i = 0; i < proxies.length; i += batchSize) {
+      const batch = proxies.slice(i, i + batchSize);
+      const batchResults = await Promise.all(
+        batch.map((p: string, bi: number) => checkProxyViaApi(p, i + bi))
+      );
+      results.push(...batchResults);
+      if (i + batchSize < proxies.length) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+
+    return res.status(200).json({ results });
+  } catch (err: any) {
+    console.error('[api/check-proxy] error:', err);
+    return res.status(500).json({ error: err?.message || 'Internal server error' });
   }
 }
