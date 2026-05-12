@@ -1,79 +1,99 @@
 export const config = { maxDuration: 10 };
 
-async function resolveHost(host: string): Promise<string> {
-  try {
-    // Use DNS over HTTPS to resolve domain to IP
-    const res = await fetch(`https://dns.google/resolve?name=${host}&type=A`);
-    const data = await res.json();
-    if (data.Answer && data.Answer.length > 0) {
-      return data.Answer[0].data;
-    }
-  } catch {}
-  return host;
-}
-
 async function checkProxyViaApi(proxy: string, index: number) {
   const parts = proxy.trim().split(':');
   if (parts.length < 2) {
-    return { index, ip: proxy, port: '', status: 'dead', error: 'Invalid format', changed: false };
+    return {
+      proxyString: proxy, working: false, exitIp: null, exitIpVersion: null,
+      country: null, city: null, region: null, postalCode: null,
+      latitude: null, longitude: null, isp: null, asn: null,
+      usageType: null, fraudScore: null, fraudRisk: null,
+      error: 'Invalid format', intelligence: null, internalFlags: null,
+      reverseDns: null, openPorts: [], isTorNode: false,
+      latencyMs: null, anonymityLevel: null, provider: null, changed: false
+    };
   }
 
-  const [host, port, username, password] = parts;
+  const [host, port] = parts;
   const start = Date.now();
 
   try {
-    // Resolve domain to IP if needed
-    const ip = host.match(/^\d+\.\d+\.\d+\.\d+$/) ? host : await resolveHost(host);
+    // Step 1: Resolve domain to IP using Google DNS over HTTPS
+    let resolvedIp = host;
+    if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      try {
+        const dnsRes = await fetch(`https://dns.google/resolve?name=${host}&type=A`);
+        const dnsData = await dnsRes.json();
+        if (dnsData.Answer && dnsData.Answer.length > 0) {
+          resolvedIp = dnsData.Answer[0].data;
+        }
+      } catch {}
+    }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-
-    const response = await fetch(
-      `http://ip-api.com/json/${ip}?fields=status,country,city,isp,proxy,hosting,query`,
-      { signal: controller.signal }
+    // Step 2: Check port status via external API
+    const portController = new AbortController();
+    const portTimeout = setTimeout(() => portController.abort(), 6000);
+    
+    const portRes = await fetch(
+      `https://api.portchecktool.com/check?host=${resolvedIp}&port=${port}`,
+      { signal: portController.signal }
     );
-    clearTimeout(timeout);
+    clearTimeout(portTimeout);
+    const portData = await portRes.json();
+    const portOpen = portData?.status === 'open' || portData?.open === true;
+    const latencyMs = Date.now() - start;
 
-    const responseTime = Date.now() - start;
+    // Step 3: Get geo/fraud info
+    const geoController = new AbortController();
+    const geoTimeout = setTimeout(() => geoController.abort(), 5000);
+    const geoRes = await fetch(
+      `http://ip-api.com/json/${resolvedIp}?fields=status,country,city,regionName,zip,isp,as,lat,lon,proxy,hosting`,
+      { signal: geoController.signal }
+    );
+    clearTimeout(geoTimeout);
+    const geo = await geoRes.json();
 
-    if (!response.ok) {
-      return { index, ip: host, port, username, password, status: 'dead', error: 'API error', changed: false };
-    }
-
-    const data = await response.json();
-
-    if (data.status === 'fail') {
-      return { index, ip: host, port, username, password, status: 'dead', error: 'IP lookup failed', changed: false };
-    }
+    const asRaw: string = geo.as || '';
+    const asnMatch = asRaw.match(/^(AS\d+)/i);
+    const asn = asnMatch ? asnMatch[1].toUpperCase() : (asRaw || null);
 
     return {
-      index,
-      ip: host,
-      port,
-      username,
-      password,
-      status: 'working',
-      responseTime,
-      country: data.country,
-      city: data.city,
-      isp: data.isp,
-      anonymityLevel: data.proxy ? 'Anonymous' : 'Transparent',
-      isVpn: data.proxy || false,
-      isDatacenter: data.hosting || false,
-      isTor: false,
-      fraudScore: data.proxy ? 75 : 10,
-      changed: false,
+      proxyString: proxy,
+      working: portOpen,
+      exitIp: resolvedIp,
+      exitIpVersion: resolvedIp.includes(':') ? 'v6' : 'v4',
+      country: geo.country || null,
+      city: geo.city || null,
+      region: geo.regionName || null,
+      postalCode: geo.zip || null,
+      latitude: geo.lat || null,
+      longitude: geo.lon || null,
+      isp: geo.isp || null,
+      asn: asn || null,
+      usageType: geo.hosting ? '(DCH) Data Center/Web Hosting/Transit' : '(COM) Commercial',
+      fraudScore: geo.proxy ? '75' : '10',
+      fraudRisk: geo.proxy ? 'High' : 'Low',
+      error: portOpen ? null : 'Port closed or unreachable',
+      intelligence: null,
+      internalFlags: null,
+      reverseDns: null,
+      openPorts: portOpen ? [parseInt(port)] : [],
+      isTorNode: false,
+      latencyMs: portOpen ? latencyMs : null,
+      anonymityLevel: geo.proxy ? 'anonymous' : 'transparent',
+      provider: null,
+      changed: false
     };
   } catch (err: any) {
     return {
-      index,
-      ip: host,
-      port,
-      username,
-      password,
-      status: 'dead',
+      proxyString: proxy, working: false, exitIp: null, exitIpVersion: null,
+      country: null, city: null, region: null, postalCode: null,
+      latitude: null, longitude: null, isp: null, asn: null,
+      usageType: null, fraudScore: null, fraudRisk: null,
       error: err.name === 'AbortError' ? 'Timeout' : 'Connection failed',
-      changed: false,
+      intelligence: null, internalFlags: null, reverseDns: null,
+      openPorts: [], isTorNode: false, latencyMs: null,
+      anonymityLevel: null, provider: null, changed: false
     };
   }
 }
@@ -88,32 +108,12 @@ export default async function handler(req: any, res: any) {
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body ?? {});
-    const { proxies, proxy } = body;
-
-    if (proxy && typeof proxy === 'string') {
-      const result = await checkProxyViaApi(proxy, 0);
-      return res.status(200).json({ result });
+    const { proxy } = body;
+    if (!proxy || typeof proxy !== 'string') {
+      return res.status(400).json({ error: "Missing 'proxy' string in body." });
     }
-
-    if (!proxies || !Array.isArray(proxies)) {
-      return res.status(400).json({ error: 'Send proxies array or single proxy string' });
-    }
-
-    const results = [];
-    const batchSize = 5;
-
-    for (let i = 0; i < proxies.length; i += batchSize) {
-      const batch = proxies.slice(i, i + batchSize);
-      const batchResults = await Promise.all(
-        batch.map((p: string, bi: number) => checkProxyViaApi(p, i + bi))
-      );
-      results.push(...batchResults);
-      if (i + batchSize < proxies.length) {
-        await new Promise(r => setTimeout(r, 200));
-      }
-    }
-
-    return res.status(200).json({ results });
+    const result = await checkProxyViaApi(proxy, 0);
+    return res.status(200).json({ result });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Internal server error' });
   }
