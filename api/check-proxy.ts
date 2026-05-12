@@ -1,6 +1,5 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-
-export const config = { maxDuration: 10 };
+Bilkul! Yeh lo ready-to-paste code — @vercel/node import hata diya, sab fix hai:
+typescriptexport const config = { maxDuration: 10 };
 
 async function checkProxyViaApi(proxy: string, index: number) {
   const parts = proxy.trim().split(':');
@@ -57,8 +56,7 @@ async function checkProxyViaApi(proxy: string, index: number) {
   }
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS
+export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -70,13 +68,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body ?? {});
     const { proxies, proxy } = body;
 
-    // Single proxy support
     if (proxy && typeof proxy === 'string') {
       const result = await checkProxyViaApi(proxy, 0);
       return res.status(200).json({ result });
     }
 
-    // Batch proxies support
     if (!proxies || !Array.isArray(proxies)) {
       return res.status(400).json({ error: 'Send proxies array or single proxy string' });
     }
